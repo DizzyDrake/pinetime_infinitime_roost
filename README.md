@@ -10,6 +10,14 @@ Roost guides breathing with short vibrations and a simple animated circle.
 
 Choose the file ending in **`-DFU.zip`** from Releases. It's a complete InfiniTime firmware update with Roost included.
 
+<p align="center">
+  <img src="assets/roost-icon.png" alt="Roost icon" width="180">
+</p>
+
+<p align="center">
+  <img src="assets/inhale.png" alt="Roost icon" width="600">
+</p>
+
 ### Features
 
 - Box breathing (4:4:4:4), 4:7:8, and 2:8 presets
