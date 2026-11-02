@@ -24,7 +24,7 @@ Choose the file ending in **`-DFU.zip`** from Releases. It's a complete InfiniTi
 - Custom patterns with up to four phases; hold screen to enter custom edit; skip unwanted phases
 - Haptic phase cues that continue when the display sleeps
 - Incoming calls and watch alarms end a breathing session
-- Remembered pattern selection and custom durations;when you re-enter Roost, your last settings will load
+- Roost remembers your selected breathing pattern and custom durations between sessions.
 - An original launcher icon customized by Aurora
 
 ## Add Roost to your own InfiniTime build
