@@ -1,6 +1,6 @@
 # License and provenance
 
-**Original Roost additions:** Aurora selected Apache License 2.0 for applicable original projects. The repository includes the unmodified Apache-2.0 text in `LICENSE` for independently licensable original contributions. No individual copyright identity has been invented. Before public publication, confirm contributors' rights and any necessary notices.
+**Original Roost additions:** Aurora selected Apache License 2.0 for applicable original projects. The repository includes the unmodified Apache-2.0 text in `LICENSE` for independently licensable original contributions. No individual copyright identity has been invented.
 
 **InfiniTime integration:** This repository is designed for InfiniTime 1.16.0 at commit `0fabfe99d9115c5e258a14fd0c985d300ee41f2d`. Upstream InfiniTime is GPLv3. The patches modify upstream GPL-governed files, and a combined redistributed firmware must comply with upstream GPLv3 obligations; an Apache-2.0 notice does **not** relicense upstream source or the firmware binary. A reference copy of GPLv3 is included in `LICENSES/`, and the upstream project's authoritative license should be checked at publication.
 
