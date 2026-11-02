@@ -2,21 +2,21 @@
 
 **A quiet, haptic breathing app for PineTime, built on InfiniTime 1.16.0.**
 
-Roost guides breathing with short vibrations and a simple animated circle. Set the watch down, let the display sleep, or follow along on screen.
+Roost guides breathing with short vibrations and a simple animated circle.
 
 ## Get Roost
 
 **[Download Roost for Gadgetbridge](../../releases/latest/download/Roost-PineTime-RC2-InfiniTime-1.16.0-DFU.zip)** · **[Installation guide](docs/INSTALL_GADGETBRIDGE.md)** · [All releases](../../releases/latest)
 
-Choose the file ending in **`-DFU.zip`** from Releases. It's a complete InfiniTime firmware update with Roost included; there is no separate app installation step. Stock Paint and Metronome remain available.
+Choose the file ending in **`-DFU.zip`** from Releases. It's a complete InfiniTime firmware update with Roost included.
 
 ### Features
 
 - Box breathing (4:4:4:4), 4:7:8, and 2:8 presets
-- Custom patterns with up to four phases; set a phase to zero to skip it
+- Custom patterns with up to four phases; hold screen to enter custom edit; skip unwanted phases
 - Haptic phase cues that continue when the display sleeps
-- Incoming calls and watch alarms take priority over a breathing session
-- Remembered pattern selection and custom durations
+- Incoming calls and watch alarms end a breathing session
+- Remembered pattern selection and custom durations;when you re-enter Roost, your last settings will load
 - An original launcher icon customized by Aurora
 
 ## Add Roost to your own InfiniTime build
@@ -34,10 +34,10 @@ The first command creates a checkout of InfiniTime 1.16.0 at commit `0fabfe99d91
 
 ## Explore the code
 
-Start with [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The [`annotated source`](docs/annotated-source/src/) adds explanatory comments alongside the runtime C++ without changing its behavior. The original seven development patches are archived in [`history/`](history/) for readers interested in the engineering process; you do not need to apply them yourself.
+Start with [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The [`annotated source`](docs/annotated-source/src/) adds explanatory comments alongside the runtime C++ without changing its behavior. The original seven development patches are archived in [`history/`](history/) for readers interested in the engineering process.
 
 ## Credits and licensing
 
-Roost was designed by **Aurora**, who specified its interactions, original artwork customization, and watch-testing criteria. GPT-6 and collaborating development agents assisted with source integration, implementation, tests, and documentation. The app integrates with the [InfiniTime project](https://github.com/InfiniTimeOrg/InfiniTime) and uses its existing watch APIs.
+Roost was designed by **Aurora**, who specified its interactions, original artwork customization, and watch-testing criteria. GPT-6 coded Roost with source integration, implementation, tests, and documentation. The app integrates with the [InfiniTime project](https://github.com/InfiniTimeOrg/InfiniTime) and uses its existing watch APIs.
 
 Original Roost contributions are provided with the Apache-2.0 license in [`LICENSE`](LICENSE). The combined InfiniTime firmware incorporates GPLv3 upstream components. See [`docs/LICENSE_AND_ATTRIBUTION.md`](docs/LICENSE_AND_ATTRIBUTION.md) for details and icon attribution.
