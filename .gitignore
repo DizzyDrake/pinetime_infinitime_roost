@@ -1,0 +1,6 @@
+# Local firmware build outputs
+build/
+roost-arm-build.log
+__pycache__/
+*.pyc
+.DS_Store
