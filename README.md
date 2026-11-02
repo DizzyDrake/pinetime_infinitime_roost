@@ -6,7 +6,7 @@ Roost guides breathing with short vibrations and a simple animated circle.
 
 ## Get Roost
 
-**[Download Roost for Gadgetbridge](../../releases/latest/download/Roost-PineTime-RC2-InfiniTime-1.16.0-DFU.zip)** · **[Installation guide](docs/INSTALL_GADGETBRIDGE.md)** · [All releases](../../releases/latest)
+**[Download Roost for Gadgetbridge](../../releases/latest/Roost-Installation-Bundle-RC2.zip)** · **[Installation guide](docs/INSTALL_GADGETBRIDGE.md)** · [All releases](../../releases/latest)
 
 Choose the file ending in **`-DFU.zip`** from Releases. It's a complete InfiniTime firmware update with Roost included.
 
