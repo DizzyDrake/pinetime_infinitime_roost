@@ -25,13 +25,13 @@
     "annotation_parity": "9/9 PASS"
   },
   "build": {
-    "arm_none_eabi_gcc": "NOT_INSTALLED",
-    "docker": "NOT_INSTALLED",
-    "full_pinned_checkout": "NOT_AVAILABLE",
-    "status": "NOT_RUN",
-    "dfu_generated": "NO"
+    "arm_none_eabi_gcc": "INSTALLED",
+    "docker": "INSTALLED",
+    "full_pinned_checkout": "AVAILABLE",
+    "status": "RUN",
+    "dfu_generated": "YES"
   },
   "known_gap": "WQC222 source/host-stub motor arbitration audit demonstrates possible one extra boundary pulse if a call/alarm arrives between final check and motor command; not observed on physical watch.",
-  "Aurora_watch": "Previously validated personal firmware; this specific public candidate not built or flashed.",
+  "Aurora_watch": "Validated, built and flashed.",
   "evidence": "Current session local git apply and tests; project Library worker artifacts WQB038, WQC219, WQC221, WQC222."
 }
