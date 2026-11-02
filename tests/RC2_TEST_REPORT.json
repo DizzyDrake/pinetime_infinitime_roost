@@ -1,0 +1,37 @@
+{
+  "candidate": "Roost RC2 2026-11-02",
+  "base_packet_sha256": "69cf33e2b258c0900d0183495bd9fcf6bb94d55ca39ab4ced4e830fb71fd3d11",
+  "followups": [
+    "WQC219 startup urgent ingress patch",
+    "WQC221 OnTimer urgent epoch patch",
+    "Preferences header comment correction"
+  ],
+  "integration": {
+    "git_apply_checks_full_archive": 7,
+    "git_apply_success_full_archive": 7,
+    "git_diff_check": "PASS",
+    "new_source_snapshots_matching_replay": "9/9",
+    "base_type": "full InfiniTime-main(1).zip archive, byte-nonidentical to pinned upstream commit",
+    "pinned_clean_checkout": "NOT_VERIFIED"
+  },
+  "host_tests": {
+    "core_normal": "PASS",
+    "editor_normal": "PASS",
+    "core_annotated": "PASS",
+    "editor_annotated": "PASS",
+    "start_urgent_eight_cases": "PASS",
+    "ontimer_urgent_four_cases": "PASS",
+    "normal_phase_cue": "PASS",
+    "annotation_parity": "9/9 PASS"
+  },
+  "build": {
+    "arm_none_eabi_gcc": "NOT_INSTALLED",
+    "docker": "NOT_INSTALLED",
+    "full_pinned_checkout": "NOT_AVAILABLE",
+    "status": "NOT_RUN",
+    "dfu_generated": "NO"
+  },
+  "known_gap": "WQC222 source/host-stub motor arbitration audit demonstrates possible one extra boundary pulse if a call/alarm arrives between final check and motor command; not observed on physical watch.",
+  "Aurora_watch": "Previously validated personal firmware; this specific public candidate not built or flashed.",
+  "evidence": "Current session local git apply and tests; project Library worker artifacts WQB038, WQC219, WQC221, WQC222."
+}

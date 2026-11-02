@@ -1,0 +1,44 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 897db7e..85417a5 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -364,6 +364,7 @@ list(APPEND SOURCE_FILES
+         BootloaderVersion.cpp
+         logging/NrfLogger.cpp
+         displayapp/DisplayApp.cpp
++        displayapp/RoostLauncherFont.cpp
+         displayapp/screens/Screen.cpp
+         displayapp/screens/Tile.cpp
+         displayapp/screens/InfiniPaint.cpp
+diff --git a/src/displayapp/screens/Symbols.h b/src/displayapp/screens/Symbols.h
+index 058b2d0..13ba65c 100644
+--- a/src/displayapp/screens/Symbols.h
++++ b/src/displayapp/screens/Symbols.h
+@@ -7,6 +7,7 @@ namespace Pinetime {
+         static constexpr const char* none = "";
+         static constexpr const char* batteryHalf = "\xEF\x89\x82";
+         static constexpr const char* heartBeat = "\xEF\x88\x9E";
++        static constexpr const char* roost = "\xEE\xAC\x80"; // U+EB00, custom launcher glyph
+         static constexpr const char* bluetooth = "\xEF\x8A\x94";
+         static constexpr const char* shieldAlt = "\xEF\x8F\xAD";
+         static constexpr const char* plug = "\xEF\x87\xA6";
+diff --git a/src/displayapp/screens/Tile.cpp b/src/displayapp/screens/Tile.cpp
+index 8d9890c..787a67a 100644
+--- a/src/displayapp/screens/Tile.cpp
++++ b/src/displayapp/screens/Tile.cpp
+@@ -2,6 +2,7 @@
+ #include "displayapp/screens/BatteryIcon.h"
+ #include "components/ble/BleController.h"
+ #include "displayapp/InfiniTimeTheme.h"
++#include "displayapp/RoostLauncherFont.h"
+ 
+ using namespace Pinetime::Applications::Screens;
+ 
+@@ -61,6 +62,7 @@ Tile::Tile(uint8_t screenID,
+ 
+   btnm1 = lv_btnmatrix_create(lv_scr_act(), nullptr);
+   lv_btnmatrix_set_map(btnm1, btnmMap);
++  lv_obj_set_style_local_text_font(btnm1, LV_BTNMATRIX_PART_BTN, LV_STATE_DEFAULT, RoostLauncherFont());
+   lv_obj_set_size(btnm1, LV_HOR_RES - 16, LV_VER_RES - 60);
+   lv_obj_align(btnm1, nullptr, LV_ALIGN_CENTER, 0, 10);
+ 

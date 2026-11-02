@@ -1,0 +1,61 @@
+diff --git a/src/components/roost/RoostPreferences.hpp b/src/components/roost/RoostPreferences.hpp
+index 5c9f478..ee7484c 100644
+--- a/src/components/roost/RoostPreferences.hpp
++++ b/src/components/roost/RoostPreferences.hpp
+@@ -3,7 +3,8 @@
+ #include "RoostCore.hpp"
+ 
+ namespace Roost {
+-// Fixed 12-byte on-disk record for a separate /roost.dat preference file.
++// Encodes a 12-byte preference payload. RoostService wraps it in an
++// 18-byte generation+CRC record stored as alternating /roost-a.dat and /roost-b.dat.
+ // Decode validates the entire record; callers fall back to Box on error.
+ // Filesystem write/atomic replacement and version policy belong to the native adapter.
+ struct Preferences {
+
+diff --git a/src/components/roost/RoostEditorDraft.hpp b/src/components/roost/RoostEditorDraft.hpp
+--- a/src/components/roost/RoostEditorDraft.hpp
++++ b/src/components/roost/RoostEditorDraft.hpp
+@@ -4,7 +4,7 @@
+ 
+ namespace Roost {
+ // Pure editor state: 0 means Skip; no zero-duration phase reaches the motor.
+-// This does not change a running session until the owner explicitly saves.
++// This does not change a running session until the user explicitly saves.
+ class EditorDraft {
+ public:
+   explicit EditorDraft(const uint8_t initial[4]) {
+diff --git a/src/displayapp/RoostLauncherFont.cpp b/src/displayapp/RoostLauncherFont.cpp
+--- a/src/displayapp/RoostLauncherFont.cpp
++++ b/src/displayapp/RoostLauncherFont.cpp
+@@ -1,4 +1,4 @@
+-// Roost launcher glyph derived from owner-supplied infinitime_roost_icon.svg.
++// Roost launcher glyph derived from the SVG supplied by Aurora.
+ // Original SVG SHA-256: 21348ede866c135f4980b7ebfeec31c207eb11006fb3634658289ce85a348c3f
+ // This is an 18x18 1-bpp bitmap (41 bytes) inside a wrapper for the regular
+ // jetbrains_mono_bold_20 font. No new font file or font-generation dependency.
+diff --git a/src/components/roost/RoostCore.hpp b/src/components/roost/RoostCore.hpp
+--- a/src/components/roost/RoostCore.hpp
++++ b/src/components/roost/RoostCore.hpp
+@@ -128,7 +128,7 @@
+     return view; // Unreachable for valid normalized patterns.
+   }
+ 
+-  // Called by a single serial session owner. Late polls skip stale boundaries;
++  // Called by one serial session caller at a time. Late polls skip stale boundaries;
+   // they never replay a burst of motor cues. Caller checks Authorize immediately
+   // before handing one request to the shared motor, after alert priority checks.
+   CueRequest Poll(uint32_t nowMs) {
+
+diff --git a/src/displayapp/screens/Roost.cpp b/src/displayapp/screens/Roost.cpp
+--- a/src/displayapp/screens/Roost.cpp
++++ b/src/displayapp/screens/Roost.cpp
+@@ -178,7 +178,7 @@ void RoostScreen::SaveEdit() {
+ }
+ 
+ bool RoostScreen::OnButtonPushed() {
+-  // Owner-confirmed: intentional physical-button exit ends the session.
++  // Aurora-confirmed: intentional physical-button exit ends the session.
+   // Return false so DisplayApp performs its usual back navigation.
+   editing = false; // Discard unsaved draft on exit.
+   service.Stop();

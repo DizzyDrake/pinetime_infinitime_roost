@@ -1,0 +1,28 @@
+--- a/src/components/roost/RoostService.cpp
++++ b/src/components/roost/RoostService.cpp
+@@ -43,12 +43,22 @@
+ bool RoostService::Start() {
+   if (!mutex || !timer || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
+   if (motor.IsRinging()) { xSemaphoreGive(mutex); return false; }
++  // Snapshot before any startup operation that can overlap an alert ingress.
++  // A concurrent call/alarm must not be reclassified as already handled.
++  const uint32_t entryEpoch = urgentEpoch.load();
+   const uint32_t now = NowMs();
+   session.Start(now);
+   alertPending = false;
+-  // An alert arriving after this snapshot must invalidate this new session.
+-  // Never clear a concurrent ingress flag while starting.
+-  sessionEpoch = urgentEpoch.load();
++  sessionEpoch = entryEpoch;
++  if (urgentEpoch.load() != entryEpoch) {
++    // MarkUrgent could not acquire our lock. Finish the terminal transition
++    // here, without scheduling a phase cue or overwriting the alert retry.
++    alertPending = true;
++    session.End(static_cast<Roost::EndReason>(urgentReason.load()));
++    xTimerStop(timer, 0);
++    xSemaphoreGive(mutex);
++    return false;
++  }
+   const bool armed = ArmNext(now);
+   if (!armed) session.End(Roost::EndReason::Manual); // Avoid active-but-silent state.
+   xSemaphoreGive(mutex);

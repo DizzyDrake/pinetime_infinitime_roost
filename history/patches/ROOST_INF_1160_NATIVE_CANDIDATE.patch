@@ -1,0 +1,871 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index e4a354d..f118fd1 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -378,6 +378,8 @@ list(APPEND SOURCE_FILES
+         displayapp/screens/Music.cpp
+         displayapp/screens/Navigation.cpp
+         displayapp/screens/Metronome.cpp
++         displayapp/screens/Roost.cpp
++         components/roost/RoostService.cpp
+         displayapp/screens/Motion.cpp
+         displayapp/screens/Weather.cpp
+         displayapp/screens/Calculator.cpp
+diff --git a/src/components/alarm/AlarmController.cpp b/src/components/alarm/AlarmController.cpp
+index 4ae42c0..9c70acd 100644
+--- a/src/components/alarm/AlarmController.cpp
++++ b/src/components/alarm/AlarmController.cpp
+@@ -118,6 +118,8 @@ void AlarmController::DisableAlarm() {
+ }
+ 
+ void AlarmController::SetOffAlarmNow() {
++  // This timer callback marks Roost ended before alarm display dispatch.
++  systemTask->EndRoostForAlarm();
+   isAlerting = true;
+   systemTask->PushMessage(System::Messages::SetOffAlarm);
+ }
+diff --git a/src/components/ble/AlertNotificationService.cpp b/src/components/ble/AlertNotificationService.cpp
+index d9f2869..a769dc4 100644
+--- a/src/components/ble/AlertNotificationService.cpp
++++ b/src/components/ble/AlertNotificationService.cpp
+@@ -71,6 +71,8 @@ int AlertNotificationService::OnAlert(struct ble_gatt_access_ctxt* ctxt) {
+     switch (category) {
+       case Categories::Call:
+         notif.category = Pinetime::Controllers::NotificationManager::Categories::IncomingCall;
++        // End Roost at call classification, before generic notification delivery.
++        systemTask.EndRoostForCall();
+         break;
+       default:
+         notif.category = Pinetime::Controllers::NotificationManager::Categories::SimpleAlert;
+diff --git a/pinned_copy/src/components/roost/RoostCore.hpp b/src/components/roost/RoostCore.hpp
+new file mode 100644
+index 0000000..7dfca3e
+--- /dev/null
++++ b/src/components/roost/RoostCore.hpp
+@@ -0,0 +1,172 @@
++#pragma once
++
++#include <cstdint>
++
++// Portable Roost logic for the pinned InfiniTime 1.16.0 integration candidate.
++// No LVGL, motor, filesystem, FreeRTOS, or global mutable state lives here.
++namespace Roost {
++
++enum class Phase : uint8_t { Inhale, HoldAfterInhale, Exhale, HoldAfterExhale };
++enum class Selection : uint8_t { Box, FourSevenEight, TwoEight, Custom };
++enum class EndReason : uint8_t { None, Manual, IncomingCall, WatchAlarm };
++
++struct Slot {
++  Phase phase;
++  uint8_t seconds;
++};
++
++struct Pattern {
++  Slot slots[4] {};
++  uint8_t count = 0;
++  uint16_t cycleSeconds = 0;
++};
++
++// Zero is the editor's Skip value. Only positive slots reach the scheduler.
++inline bool Normalize(const uint8_t seconds[4], Pattern& out) {
++  Pattern next {};
++  constexpr Phase phases[4] = {Phase::Inhale, Phase::HoldAfterInhale,
++                                Phase::Exhale, Phase::HoldAfterExhale};
++  for (uint8_t i = 0; i < 4; ++i) {
++    if (seconds[i] > 30) return false;
++    if (seconds[i] == 0) continue;
++    next.slots[next.count++] = {phases[i], seconds[i]};
++    next.cycleSeconds = static_cast<uint16_t>(next.cycleSeconds + seconds[i]);
++  }
++  if (next.count == 0) return false;
++  out = next;  // Invalid edits leave the previous runnable pattern intact.
++  return true;
++}
++
++inline Pattern Preset(Selection selected) {
++  Pattern result {};
++  constexpr uint8_t box[4] = {4, 4, 4, 4};
++  constexpr uint8_t fourSevenEight[4] = {4, 7, 8, 0};
++  constexpr uint8_t twoEight[4] = {2, 0, 8, 0};
++  if (selected == Selection::Box) Normalize(box, result);
++  else if (selected == Selection::FourSevenEight) Normalize(fourSevenEight, result);
++  else Normalize(twoEight, result);
++  return result;
++}
++
++struct View {
++  Phase phase = Phase::Inhale;
++  uint8_t slot = 0;
++  uint32_t phaseElapsedMs = 0;
++  uint32_t phaseDurationMs = 0;
++  bool running = false;
++};
++
++struct CueRequest {
++  uint32_t generation = 0;
++  Phase phase = Phase::Inhale;
++  bool due = false;
++};
++
++class Session {
++ public:
++  Session() : pattern_(Preset(Selection::Box)) {}
++
++  Selection Selected() const { return selected_; }
++  bool Running() const { return running_; }
++  EndReason LastEnd() const { return lastEnd_; }
++  uint32_t Generation() const { return generation_; }
++  const Pattern& CurrentPattern() const { return pattern_; }
++
++  // A selection change ends the old cycle; the caller must explicitly Start.
++  bool Select(Selection value) {
++    if (value == Selection::Custom && !hasCustom_) return false;
++    if (value > Selection::Custom) return false;
++    End(EndReason::Manual);
++    selected_ = value;
++    pattern_ = value == Selection::Custom ? custom_ : Preset(value);
++    return true;
++  }
++
++  bool SaveCustom(const uint8_t seconds[4]) {
++    Pattern next {};
++    if (!Normalize(seconds, next)) return false;
++    custom_ = next;
++    hasCustom_ = true;
++    if (selected_ == Selection::Custom) {
++      End(EndReason::Manual);
++      pattern_ = custom_;
++    }
++    return true;
++  }
++
++  void Start(uint32_t nowMs) {
++    ++generation_;
++    startMs_ = nowMs;
++    lastBoundary_ = 0;
++    running_ = true;
++    lastEnd_ = EndReason::None;
++  }
++
++  void End(EndReason reason) {
++    ++generation_;  // Invalidate requests already queued by timer callbacks.
++    running_ = false;
++    lastEnd_ = reason;
++  }
++
++  View Observe(uint32_t nowMs) const {
++    View view {};
++    if (!running_) return view;
++    const uint32_t position = (nowMs - startMs_) % (pattern_.cycleSeconds * 1000u);
++    uint32_t boundary = 0;
++    for (uint8_t i = 0; i < pattern_.count; ++i) {
++      const uint32_t duration = pattern_.slots[i].seconds * 1000u;
++      if (position < boundary + duration) {
++        view.phase = pattern_.slots[i].phase;
++        view.slot = i;
++        view.phaseElapsedMs = position - boundary;
++        view.phaseDurationMs = duration;
++        view.running = true;
++        return view;
++      }
++      boundary += duration;
++    }
++    return view; // Unreachable for valid normalized patterns.
++  }
++
++  // Called by a single serial session owner. Late polls skip stale boundaries;
++  // they never replay a burst of motor cues. Caller checks Authorize immediately
++  // before handing one request to the shared motor, after alert priority checks.
++  CueRequest Poll(uint32_t nowMs) {
++    CueRequest request {};
++    if (!running_) return request;
++    const uint32_t elapsed = nowMs - startMs_;
++    const uint32_t cycleMs = pattern_.cycleSeconds * 1000u;
++    const uint32_t cycle = elapsed / cycleMs;
++    const uint32_t position = elapsed % cycleMs;
++    uint32_t boundaryInCycle = 0;
++    uint8_t index = 0;
++    for (uint8_t i = 0; i < pattern_.count; ++i) {
++      if (position >= boundaryInCycle) index = i;
++      boundaryInCycle += pattern_.slots[i].seconds * 1000u;
++    }
++    // Ordinal 0 means initial phase; first cue timing remains an adapter choice.
++    const uint32_t ordinal = cycle * pattern_.count + index;
++    if (ordinal > lastBoundary_) {
++      lastBoundary_ = ordinal;
++      request = {generation_, pattern_.slots[index].phase, true};
++    }
++    return request;
++  }
++
++  bool Authorize(const CueRequest& request) const {
++    return request.due && running_ && request.generation == generation_;
++  }
++
++ private:
++  Pattern pattern_;
++  Pattern custom_ {};
++  Selection selected_ = Selection::Box;
++  EndReason lastEnd_ = EndReason::None;
++  uint32_t generation_ = 0;
++  uint32_t startMs_ = 0;
++  uint32_t lastBoundary_ = 0;
++  bool running_ = false;
++  bool hasCustom_ = false;
++};
++
++} // namespace Roost
+diff --git a/pinned_copy/src/components/roost/RoostPreferences.hpp b/src/components/roost/RoostPreferences.hpp
+new file mode 100644
+index 0000000..5c9f478
+--- /dev/null
++++ b/src/components/roost/RoostPreferences.hpp
+@@ -0,0 +1,49 @@
++#pragma once
++
++#include "RoostCore.hpp"
++
++namespace Roost {
++// Fixed 12-byte on-disk record for a separate /roost.dat preference file.
++// Decode validates the entire record; callers fall back to Box on error.
++// Filesystem write/atomic replacement and version policy belong to the native adapter.
++struct Preferences {
++  Selection selected = Selection::Box;
++  uint8_t custom[4] = {4, 4, 4, 4};
++  bool hasCustom = false;
++};
++
++inline void Encode(const Preferences& value, uint8_t bytes[12]) {
++  bytes[0] = 'R'; bytes[1] = 'O'; bytes[2] = 'O'; bytes[3] = 'S';
++  bytes[4] = 1; // file format version
++  bytes[5] = static_cast<uint8_t>(value.selected);
++  bytes[6] = value.hasCustom ? 1 : 0;
++  for (uint8_t i = 0; i < 4; ++i) bytes[7 + i] = value.custom[i];
++  uint8_t check = 0;
++  for (uint8_t i = 0; i < 11; ++i) check ^= bytes[i];
++  bytes[11] = check;
++}
++
++inline bool Decode(const uint8_t bytes[12], Preferences& out) {
++  if (bytes[0] != 'R' || bytes[1] != 'O' || bytes[2] != 'O' || bytes[3] != 'S' || bytes[4] != 1 ||
++      bytes[5] > static_cast<uint8_t>(Selection::Custom) || bytes[6] > 1) return false;
++  uint8_t check = 0;
++  for (uint8_t i = 0; i < 11; ++i) check ^= bytes[i];
++  if (check != bytes[11]) return false;
++  uint8_t slots[4] = {bytes[7], bytes[8], bytes[9], bytes[10]};
++  Pattern normalized {};
++  if (bytes[6] && !Normalize(slots, normalized)) return false;
++  if (bytes[5] == static_cast<uint8_t>(Selection::Custom) && !bytes[6]) return false;
++  Preferences next {};
++  next.selected = static_cast<Selection>(bytes[5]);
++  next.hasCustom = bytes[6] != 0;
++  for (uint8_t i = 0; i < 4; ++i) next.custom[i] = slots[i];
++  out = next;
++  return true;
++}
++
++inline void Apply(const Preferences& preferences, Session& session) {
++  if (preferences.hasCustom) session.SaveCustom(preferences.custom);
++  session.Select(preferences.selected);
++  // Apply restores the selected pattern, never a running session.
++}
++} // namespace Roost
+diff --git a/pinned_copy/src/components/roost/RoostService.cpp b/src/components/roost/RoostService.cpp
+new file mode 100644
+index 0000000..09a9e5f
+--- /dev/null
++++ b/src/components/roost/RoostService.cpp
+@@ -0,0 +1,214 @@
++#include "components/roost/RoostService.h"
++#include "components/motor/MotorController.h"
++#include "components/fs/FS.h"
++#include <task.h>
++
++using Pinetime::Controllers::RoostService;
++
++namespace {
++  uint16_t RecordCrc(const uint8_t* bytes, uint8_t count) {
++    uint16_t crc = 0xffff;
++    for (uint8_t i = 0; i < count; ++i) {
++      crc ^= static_cast<uint16_t>(bytes[i]) << 8u;
++      for (uint8_t bit = 0; bit < 8; ++bit)
++        crc = static_cast<uint16_t>((crc << 1u) ^ ((crc & 0x8000u) ? 0x1021u : 0u));
++    }
++    return crc;
++  }
++}
++
++uint32_t RoostService::NowMs() {
++  // Source tick rate is 1024 Hz; this conversion has sub-ms quantization.
++  // Revisit this conversion if configTICK_RATE_HZ or clock width changes.
++  return static_cast<uint32_t>(static_cast<uint64_t>(xTaskGetTickCount()) * 1000u / configTICK_RATE_HZ);
++}
++
++bool RoostService::Init() {
++  mutex = xSemaphoreCreateMutex();
++  if (!mutex) return false;
++  timer = xTimerCreate("Roost", 1, pdFALSE, this, TimerCallback);
++  if (timer) LoadSelection();
++  return timer != nullptr;
++}
++
++bool RoostService::ArmNext(uint32_t nowMs) {
++  const auto view = session.Observe(nowMs);
++  if (!view.running || !timer) return false;
++  const uint32_t remaining = view.phaseDurationMs - view.phaseElapsedMs;
++  TickType_t delay = pdMS_TO_TICKS(remaining);
++  if (delay == 0) delay = 1;
++  return xTimerChangePeriod(timer, delay, 0) == pdPASS;
++}
++
++bool RoostService::Start() {
++  if (!mutex || !timer || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
++  if (motor.IsRinging()) { xSemaphoreGive(mutex); return false; }
++  const uint32_t now = NowMs();
++  session.Start(now);
++  alertPending = false;
++  // An alert arriving after this snapshot must invalidate this new session.
++  // Never clear a concurrent ingress flag while starting.
++  sessionEpoch = urgentEpoch.load();
++  const bool armed = ArmNext(now);
++  if (!armed) session.End(Roost::EndReason::Manual); // Avoid active-but-silent state.
++  xSemaphoreGive(mutex);
++  return armed;
++}
++
++void RoostService::End(Roost::EndReason reason) {
++  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
++  alertPending = reason == Roost::EndReason::IncomingCall || reason == Roost::EndReason::WatchAlarm;
++  session.End(reason); // Invalidates queued cue generation before timer cancellation.
++  if (timer) xTimerStop(timer, 0);
++  xSemaphoreGive(mutex);
++  // Do not StopRinging: the shared motor may already belong to an alert.
++}
++
++void RoostService::Stop() { End(Roost::EndReason::Manual); }
++void RoostService::MarkUrgent(Roost::EndReason reason) {
++  // This ingress flag closes the queue-latency window before the normal
++  // notification/alarm display path. Do not block the FreeRTOS timer daemon.
++  urgentReason.store(static_cast<uint8_t>(reason));
++  urgentEpoch.fetch_add(1);
++  if (!mutex || xSemaphoreTake(mutex, 0) != pdTRUE) {
++    if (timer) xTimerChangePeriod(timer, 1, 0); // Retry terminal state on timer task.
++    return;
++  }
++  alertPending = true;
++  session.End(reason);
++  if (timer) xTimerStop(timer, 0);
++  xSemaphoreGive(mutex);
++}
++void RoostService::EndForCall() { MarkUrgent(Roost::EndReason::IncomingCall); }
++void RoostService::EndForAlarm() { MarkUrgent(Roost::EndReason::WatchAlarm); }
++
++bool RoostService::Select(Roost::Selection selection) {
++  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
++  const bool selected = session.Select(selection); // Selection ends the old cycle.
++  if (selected && timer) xTimerStop(timer, 0);
++  if (selected) preferences.selected = selection;
++  xSemaphoreGive(mutex);
++  if (selected) WriteSelection(); // Only a deliberate selection writes flash.
++  return selected;
++}
++
++bool RoostService::SaveCustom(const uint8_t seconds[4]) {
++  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
++  const bool saved = session.SaveCustom(seconds);
++  if (saved) {
++    for (uint8_t i = 0; i < 4; ++i) preferences.custom[i] = seconds[i];
++    preferences.hasCustom = true;
++    if (preferences.selected == Roost::Selection::Custom && timer) xTimerStop(timer, 0);
++  }
++  xSemaphoreGive(mutex);
++  if (saved) WriteSelection(); // Save occurs on explicit editor commit, not animation.
++  return saved;
++}
++
++bool RoostService::ReadSlot(const char* path, uint32_t& generation, Roost::Preferences& value) {
++  uint8_t bytes[18] {};
++  lfs_file_t file {};
++  if (filesystem.FileOpen(&file, path, LFS_O_RDONLY) != LFS_ERR_OK) return false;
++  const int read = filesystem.FileRead(&file, bytes, sizeof(bytes));
++  const int closed = filesystem.FileClose(&file);
++  if (read != static_cast<int>(sizeof(bytes)) || closed != LFS_ERR_OK) return false;
++  const uint16_t stored = static_cast<uint16_t>(bytes[16]) | (static_cast<uint16_t>(bytes[17]) << 8u);
++  if (stored != RecordCrc(bytes, 16) || !Roost::Decode(bytes + 4, value)) return false;
++  generation = static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8u) |
++               (static_cast<uint32_t>(bytes[2]) << 16u) | (static_cast<uint32_t>(bytes[3]) << 24u);
++  return true;
++}
++
++void RoostService::LoadSelection() {
++  uint32_t aGeneration = 0, bGeneration = 0;
++  Roost::Preferences a {}, b {};
++  const bool validA = ReadSlot("/roost-a.dat", aGeneration, a);
++  const bool validB = ReadSlot("/roost-b.dat", bGeneration, b);
++  if (!validA && !validB) return; // Default Box; no automatic session start.
++  const bool chooseA = validA && (!validB || static_cast<int32_t>(aGeneration - bGeneration) > 0);
++  preferences = chooseA ? a : b;
++  preferenceGeneration = chooseA ? aGeneration : bGeneration;
++  preferenceSlot = chooseA ? 0 : 1;
++  Roost::Apply(preferences, session);
++}
++
++bool RoostService::WriteSelection() {
++  // Alternate two fixed-size records. A torn write leaves the prior valid
++  // slot available on reboot; a failed write does not advance the slot.
++  uint8_t bytes[18] {};
++  const uint32_t next = preferenceGeneration + 1;
++  for (uint8_t i = 0; i < 4; ++i) bytes[i] = static_cast<uint8_t>(next >> (i * 8u));
++  Roost::Encode(preferences, bytes + 4);
++  const uint16_t crc = RecordCrc(bytes, 16);
++  bytes[16] = static_cast<uint8_t>(crc);
++  bytes[17] = static_cast<uint8_t>(crc >> 8u);
++  const uint8_t nextSlot = preferenceSlot == 0 ? 1 : 0;
++  const char* path = nextSlot == 0 ? "/roost-a.dat" : "/roost-b.dat";
++  lfs_file_t file {};
++  if (filesystem.FileOpen(&file, path, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC) != LFS_ERR_OK) return false;
++  const int written = filesystem.FileWrite(&file, bytes, sizeof(bytes));
++  const int closed = filesystem.FileClose(&file);
++  if (written != static_cast<int>(sizeof(bytes)) || closed != LFS_ERR_OK) return false;
++  preferenceGeneration = next;
++  preferenceSlot = nextSlot;
++  return true;
++}
++
++Roost::Selection RoostService::Selected() {
++  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return Roost::Selection::Box;
++  const auto value = session.Selected();
++  xSemaphoreGive(mutex);
++  return value;
++}
++
++bool RoostService::Running() {
++  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
++  const bool value = session.Running();
++  xSemaphoreGive(mutex);
++  return value;
++}
++
++Roost::EndReason RoostService::LastEnd() {
++  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return Roost::EndReason::None;
++  const auto reason = session.LastEnd();
++  xSemaphoreGive(mutex);
++  return reason;
++}
++
++Roost::View RoostService::Observe() {
++  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return {};
++  const auto view = session.Observe(NowMs());
++  xSemaphoreGive(mutex);
++  return view;
++}
++
++void RoostService::TimerCallback(TimerHandle_t timer) {
++  auto* service = static_cast<RoostService*>(pvTimerGetTimerID(timer));
++  service->OnTimer();
++}
++
++void RoostService::OnTimer() {
++  // Timer callbacks execute in the FreeRTOS timer daemon, outside LVGL.
++  if (!mutex || xSemaphoreTake(mutex, 0) != pdTRUE) {
++    // Never block the timer daemon waiting for a display/alert task.
++    if (timer) xTimerChangePeriod(timer, 1, 0);
++    return;
++  }
++  const uint32_t now = NowMs();
++  if (urgentEpoch.load() != sessionEpoch) {
++    const uint8_t reason = urgentReason.load();
++    alertPending = true;
++    session.End(static_cast<Roost::EndReason>(reason));
++    xSemaphoreGive(mutex);
++    return;
++  }
++  const auto request = session.Poll(now);
++  if (request.due && session.Authorize(request) && !alertPending && urgentEpoch.load() == sessionEpoch && !motor.IsRinging()) {
++    // Provisional first-trial cue: one short pulse at each phase boundary.
++    // If cue vocabulary or notification coexistence changes, revisit this
++    // point and the alert ingress paths together.
++    motor.RunForDuration(30);
++  }
++  if (session.Running() && !ArmNext(now)) session.End(Roost::EndReason::Manual);
++  xSemaphoreGive(mutex);
++}
+diff --git a/pinned_copy/src/components/roost/RoostService.h b/src/components/roost/RoostService.h
+new file mode 100644
+index 0000000..0d04490
+--- /dev/null
++++ b/src/components/roost/RoostService.h
+@@ -0,0 +1,57 @@
++#pragma once
++
++#include <FreeRTOS.h>
++#include <semphr.h>
++#include <timers.h>
++#include <atomic>
++#include "components/roost/RoostCore.hpp"
++#include "components/roost/RoostPreferences.hpp"
++
++namespace Pinetime {
++  namespace Controllers {
++    class MotorController;
++    class FS;
++
++    // One service belongs to DisplayApp, independent of any LVGL screen.
++    // Timer and alert callbacks serialize session changes through a mutex.
++    class RoostService {
++    public:
++      RoostService(MotorController& motor, FS& filesystem) : motor {motor}, filesystem {filesystem} {}
++      bool Init();
++      bool Start();
++      void Stop();
++      void EndForCall();
++      void EndForAlarm();
++      bool Select(Roost::Selection selection);
++      bool SaveCustom(const uint8_t seconds[4]);
++      Roost::Selection Selected();
++      bool Running();
++      Roost::EndReason LastEnd();
++      Roost::View Observe();
++
++    private:
++      static void TimerCallback(TimerHandle_t timer);
++      void OnTimer();
++      bool ArmNext(uint32_t nowMs);
++      void End(Roost::EndReason reason);
++      void MarkUrgent(Roost::EndReason reason);
++      static uint32_t NowMs();
++      bool ReadSlot(const char* path, uint32_t& generation, Roost::Preferences& value);
++      bool WriteSelection();
++      void LoadSelection();
++
++      MotorController& motor;
++      FS& filesystem;
++      Roost::Session session {};
++      Roost::Preferences preferences {};
++      uint32_t preferenceGeneration = 0;
++      uint8_t preferenceSlot = 1; // First save goes to slot 0.
++      SemaphoreHandle_t mutex = nullptr;
++      TimerHandle_t timer = nullptr;
++      bool alertPending = false;
++      std::atomic<uint8_t> urgentReason {0};
++      std::atomic<uint32_t> urgentEpoch {0};
++      uint32_t sessionEpoch = 0;
++    };
++  }
++}
+diff --git a/src/displayapp/Controllers.h b/src/displayapp/Controllers.h
+index 223c7c6..cedfa55 100644
+--- a/src/displayapp/Controllers.h
++++ b/src/displayapp/Controllers.h
+@@ -17,6 +17,7 @@ namespace Pinetime {
+     class HeartRateController;
+     class Settings;
+     class MotorController;
++    class RoostService;
+     class MotionController;
+     class StopWatchController;
+     class AlarmController;
+@@ -41,6 +42,7 @@ namespace Pinetime {
+       Pinetime::Controllers::HeartRateController& heartRateController;
+       Pinetime::Controllers::Settings& settingsController;
+       Pinetime::Controllers::MotorController& motorController;
++      Pinetime::Controllers::RoostService& roostService;
+       Pinetime::Controllers::MotionController& motionController;
+       Pinetime::Controllers::StopWatchController& stopWatchController;
+       Pinetime::Controllers::AlarmController& alarmController;
+diff --git a/src/displayapp/DisplayApp.cpp b/src/displayapp/DisplayApp.cpp
+index 84fa603..3b68211 100644
+--- a/src/displayapp/DisplayApp.cpp
++++ b/src/displayapp/DisplayApp.cpp
+@@ -17,6 +17,7 @@
+ #include "displayapp/screens/Paddle.h"
+ #include "displayapp/screens/StopWatch.h"
+ #include "displayapp/screens/Metronome.h"
++#include "displayapp/screens/Roost.h"
+ #include "displayapp/screens/Music.h"
+ #include "displayapp/screens/Navigation.h"
+ #include "displayapp/screens/Notifications.h"
+@@ -111,6 +112,7 @@ DisplayApp::DisplayApp(Drivers::St7789& lcd,
+     spiNorFlash {spiNorFlash},
+     lvgl {lcd, filesystem},
+     timer(this, TimerCallback),
++    roostService {motorController, filesystem},
+     controllers {batteryController,
+                  bleController,
+                  dateTimeController,
+@@ -118,6 +120,7 @@ DisplayApp::DisplayApp(Drivers::St7789& lcd,
+                  heartRateController,
+                  settingsController,
+                  motorController,
++                  roostService,
+                  motionController,
+                  stopWatchController,
+                  alarmController,
+@@ -161,6 +164,7 @@ void DisplayApp::Process(void* instance) {
+ void DisplayApp::Init() {
+   lcd.Init();
+   motorController.Init();
++  roostService.Init(); // Timer and motor exist before Roost can be opened.
+   brightnessController.Init();
+   ApplyBrightness();
+   lvgl.Init();
+diff --git a/src/displayapp/DisplayApp.h b/src/displayapp/DisplayApp.h
+index 016f91d..21b56f6 100644
+--- a/src/displayapp/DisplayApp.h
++++ b/src/displayapp/DisplayApp.h
+@@ -9,6 +9,7 @@
+ #include "displayapp/TouchEvents.h"
+ #include "components/brightness/BrightnessController.h"
+ #include "components/motor/MotorController.h"
++#include "components/roost/RoostService.h"
+ #include "components/firmwarevalidator/FirmwareValidator.h"
+ #include "components/settings/Settings.h"
+ #include "displayapp/screens/Screen.h"
+@@ -71,6 +72,8 @@ namespace Pinetime {
+                  Pinetime::Controllers::FS& filesystem,
+                  Pinetime::Drivers::SpiNorFlash& spiNorFlash);
+       void Start(System::BootErrors error);
++      void EndRoostForCall() { roostService.EndForCall(); }
++      void EndRoostForAlarm() { roostService.EndForAlarm(); }
+       void PushMessage(Display::Messages msg);
+ 
+       void StartApp(Apps app, DisplayApp::FullRefreshDirections direction);
+@@ -105,6 +108,7 @@ namespace Pinetime {
+       Pinetime::Controllers::FirmwareValidator validator;
+       Pinetime::Components::LittleVgl lvgl;
+       Pinetime::Controllers::Timer timer;
++      Pinetime::Controllers::RoostService roostService;
+ 
+       AppControllers controllers;
+       TaskHandle_t taskHandle;
+diff --git a/src/displayapp/apps/Apps.h.in b/src/displayapp/apps/Apps.h.in
+index d440b59..4ecff56 100644
+--- a/src/displayapp/apps/Apps.h.in
++++ b/src/displayapp/apps/Apps.h.in
+@@ -45,7 +45,8 @@ namespace Pinetime {
+       SettingShakeThreshold,
+       SettingBluetooth,
+       SettingOTA,
+-      Error
++      Error,
++      Roost
+     };
+ 
+     enum class WatchFace : uint8_t {
+diff --git a/src/displayapp/apps/CMakeLists.txt b/src/displayapp/apps/CMakeLists.txt
+index 93196ed..6d80299 100644
+--- a/src/displayapp/apps/CMakeLists.txt
++++ b/src/displayapp/apps/CMakeLists.txt
+@@ -12,6 +12,7 @@ else ()
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Twos")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Dice")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Metronome")
++    set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Roost")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Navigation")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Calculator")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Weather")
+diff --git a/pinned_copy/src/displayapp/screens/Roost.cpp b/src/displayapp/screens/Roost.cpp
+new file mode 100644
+index 0000000..b2bd546
+--- /dev/null
++++ b/src/displayapp/screens/Roost.cpp
+@@ -0,0 +1,118 @@
++#include "displayapp/screens/Roost.h"
++#include <lvgl/lvgl.h>
++
++using Pinetime::Applications::Screens::RoostScreen;
++
++namespace {
++  void EventHandler(lv_obj_t* obj, lv_event_t event) {
++    auto* screen = static_cast<RoostScreen*>(obj->user_data);
++    screen->OnEvent(obj, event);
++  }
++  const char* PatternName(Roost::Selection selected) {
++    switch (selected) {
++      case Roost::Selection::Box: return "4-4-4-4";
++      case Roost::Selection::FourSevenEight: return "4-7-8";
++      case Roost::Selection::TwoEight: return "2-8";
++      case Roost::Selection::Custom: return "Custom";
++    }
++    return "4-4-4-4";
++  }
++  const char* PhaseName(Roost::Phase phase) {
++    switch (phase) {
++      case Roost::Phase::Inhale: return "Inhale";
++      case Roost::Phase::Exhale: return "Exhale";
++      case Roost::Phase::HoldAfterInhale:
++      case Roost::Phase::HoldAfterExhale: return "Hold";
++    }
++    return "Inhale";
++  }
++}
++
++RoostScreen::RoostScreen(Pinetime::Controllers::RoostService& service) : service {service} {
++  background = lv_obj_create(lv_scr_act(), nullptr);
++  lv_obj_set_size(background, 240, 240);
++  lv_obj_align(background, lv_scr_act(), LV_ALIGN_CENTER, 0, 0);
++  lv_obj_set_style_local_bg_color(background, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, lv_color_hex(0x9CDCF5));
++  lv_obj_set_style_local_bg_grad_color(background, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, lv_color_hex(0x173D82));
++  lv_obj_set_style_local_bg_grad_dir(background, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_GRAD_DIR_VER);
++  lv_obj_set_style_local_bg_opa(background, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_COVER);
++  lv_obj_set_style_local_border_width(background, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, 0);
++  lv_obj_set_style_local_radius(background, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, 0);
++
++  circle = lv_obj_create(lv_scr_act(), nullptr);
++  lv_obj_set_style_local_radius(circle, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_RADIUS_CIRCLE);
++  lv_obj_set_style_local_bg_color(circle, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
++  lv_obj_set_style_local_bg_opa(circle, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_COVER);
++  lv_obj_set_style_local_border_width(circle, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, 0);
++  lv_obj_set_size(circle, 64, 64);
++  lv_obj_align(circle, lv_scr_act(), LV_ALIGN_CENTER, 0, 0);
++
++  phaseLabel = lv_label_create(lv_scr_act(), nullptr);
++  lv_obj_set_style_local_text_color(phaseLabel, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
++  lv_label_set_text(phaseLabel, "Inhale");
++  lv_obj_align(phaseLabel, lv_scr_act(), LV_ALIGN_IN_TOP_MID, 0, 18);
++
++  patternButton = lv_btn_create(lv_scr_act(), nullptr);
++  patternButton->user_data = this;
++  lv_obj_set_event_cb(patternButton, EventHandler);
++  lv_obj_set_size(patternButton, 100, 38);
++  lv_obj_align(patternButton, lv_scr_act(), LV_ALIGN_IN_BOTTOM_LEFT, 8, -7);
++  lv_obj_set_style_local_bg_opa(patternButton, LV_BTN_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_TRANSP);
++  patternLabel = lv_label_create(patternButton, nullptr);
++  lv_obj_set_style_local_text_color(patternLabel, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, lv_color_hex(0xD5DDEC));
++
++  playButton = lv_btn_create(lv_scr_act(), nullptr);
++  playButton->user_data = this;
++  lv_obj_set_event_cb(playButton, EventHandler);
++  lv_obj_set_size(playButton, 76, 38);
++  lv_obj_align(playButton, lv_scr_act(), LV_ALIGN_IN_BOTTOM_RIGHT, -8, -7);
++  lv_obj_set_style_local_bg_opa(playButton, LV_BTN_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_TRANSP);
++  playLabel = lv_label_create(playButton, nullptr);
++  lv_obj_set_style_local_text_color(playLabel, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
++  Refresh();
++  taskRefresh = lv_task_create(RefreshTaskCallback, LV_DISP_DEF_REFR_PERIOD, LV_TASK_PRIO_MID, this);
++}
++
++RoostScreen::~RoostScreen() {
++  lv_task_del(taskRefresh);
++  lv_obj_clean(lv_scr_act());
++  // Session intentionally survives LVGL screen destruction and screen sleep.
++}
++
++void RoostScreen::Refresh() {
++  const auto view = service.Observe();
++  const uint32_t fraction = view.phaseDurationMs == 0 ? 0 : view.phaseElapsedMs * 51u / view.phaseDurationMs;
++  uint32_t radius = 32;
++  if (view.running) {
++    if (view.phase == Roost::Phase::Inhale) radius += fraction;
++    else if (view.phase == Roost::Phase::HoldAfterInhale) radius = 83;
++    else if (view.phase == Roost::Phase::Exhale) radius = 83 - fraction;
++  }
++  const auto diameter = static_cast<lv_coord_t>(radius * 2u);
++  lv_obj_set_size(circle, diameter, diameter);
++  lv_obj_align(circle, lv_scr_act(), LV_ALIGN_CENTER, 0, 0);
++  const auto ended = service.LastEnd();
++  const char* label = view.running ? PhaseName(view.phase) :
++                      (ended == Roost::EndReason::IncomingCall || ended == Roost::EndReason::WatchAlarm ? "Ended" : "Ready");
++  lv_label_set_text(phaseLabel, label);
++  lv_obj_align(phaseLabel, lv_scr_act(), LV_ALIGN_IN_TOP_MID, 0, 18);
++  lv_label_set_text(patternLabel, PatternName(service.Selected()));
++  lv_label_set_text(playLabel, service.Running() ? "Stop" : "Start");
++}
++
++void RoostScreen::OnEvent(lv_obj_t* obj, lv_event_t event) {
++  if (event != LV_EVENT_CLICKED) return;
++  if (obj == playButton) {
++    if (service.Running()) service.Stop();
++    else service.Start();
++  } else if (obj == patternButton) {
++    // Provisional simple switch: tap label to cycle presets; switching ends
++    // the old cycle and requires an explicit new Start.
++    auto selection = service.Selected();
++    if (selection == Roost::Selection::Box) selection = Roost::Selection::FourSevenEight;
++    else if (selection == Roost::Selection::FourSevenEight) selection = Roost::Selection::TwoEight;
++    else selection = Roost::Selection::Box;
++    service.Select(selection);
++  }
++  Refresh();
++}
+diff --git a/pinned_copy/src/displayapp/screens/Roost.h b/src/displayapp/screens/Roost.h
+new file mode 100644
+index 0000000..63e0404
+--- /dev/null
++++ b/src/displayapp/screens/Roost.h
+@@ -0,0 +1,42 @@
++#pragma once
++
++#include "components/roost/RoostService.h"
++#include "displayapp/screens/Screen.h"
++#include "displayapp/screens/Symbols.h"
++#include "displayapp/apps/Apps.h"
++#include "displayapp/Controllers.h"
++
++namespace Pinetime {
++  namespace Applications {
++    namespace Screens {
++      class RoostScreen : public Screen {
++      public:
++        explicit RoostScreen(Controllers::RoostService& service);
++        ~RoostScreen() override;
++        void Refresh() override;
++        void OnEvent(lv_obj_t* obj, lv_event_t event);
++
++      private:
++        Controllers::RoostService& service;
++        lv_obj_t* background = nullptr;
++        lv_obj_t* circle = nullptr;
++        lv_obj_t* phaseLabel = nullptr;
++        lv_obj_t* patternButton = nullptr;
++        lv_obj_t* patternLabel = nullptr;
++        lv_obj_t* playButton = nullptr;
++        lv_obj_t* playLabel = nullptr;
++        lv_task_t* taskRefresh = nullptr;
++      };
++    }
++
++    template <>
++    struct AppTraits<Apps::Roost> {
++      static constexpr Apps app = Apps::Roost;
++      static constexpr const char* icon = Screens::Symbols::heartBeat;
++      static Screens::Screen* Create(AppControllers& controllers) {
++        return new Screens::RoostScreen(controllers.roostService);
++      }
++      static bool IsAvailable(Pinetime::Controllers::FS& /*filesystem*/) { return true; }
++    };
++  }
++}
+diff --git a/src/systemtask/SystemTask.cpp b/src/systemtask/SystemTask.cpp
+index 56bf927..98240a2 100644
+--- a/src/systemtask/SystemTask.cpp
++++ b/src/systemtask/SystemTask.cpp
+@@ -510,3 +510,15 @@ void SystemTask::PushMessage(System::Messages msg) {
+     xQueueSend(systemTasksMsgQueue, &msg, portMAX_DELAY);
+   }
+ }
++
++void SystemTask::EndRoostForCall() {
++#ifndef PINETIME_IS_RECOVERY
++  displayApp.EndRoostForCall();
++#endif
++}
++
++void SystemTask::EndRoostForAlarm() {
++#ifndef PINETIME_IS_RECOVERY
++  displayApp.EndRoostForAlarm();
++#endif
++}
+diff --git a/src/systemtask/SystemTask.h b/src/systemtask/SystemTask.h
+index 606ddd3..12480bb 100644
+--- a/src/systemtask/SystemTask.h
++++ b/src/systemtask/SystemTask.h
+@@ -78,6 +78,8 @@ namespace Pinetime {
+ 
+       void Start();
+       void PushMessage(Messages msg);
++      void EndRoostForCall();
++      void EndRoostForAlarm();
+ 
+       bool IsSleepDisabled() {
+         return wakeLocksHeld > 0;

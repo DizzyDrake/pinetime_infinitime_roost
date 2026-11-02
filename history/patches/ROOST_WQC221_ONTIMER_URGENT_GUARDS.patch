@@ -1,0 +1,42 @@
+diff --git a/src/components/roost/RoostService.cpp b/src/components/roost/RoostService.cpp
+--- a/src/components/roost/RoostService.cpp
++++ b/src/components/roost/RoostService.cpp
+@@ -250,12 +250,29 @@
+     return;
+   }
+   const auto request = session.Poll(now);
+-  if (request.due && session.Authorize(request) && !alertPending && urgentEpoch.load() == sessionEpoch && !motor.IsRinging()) {
+-    // Provisional first-trial cue: one short pulse at each phase boundary.
+-    // If cue vocabulary or notification coexistence changes, revisit this
+-    // point and the alert ingress paths together.
+-    motor.RunForDuration(30);
+-  }
+-  if (session.Running() && !ArmNext(now)) session.End(Roost::EndReason::Manual);
+-  xSemaphoreGive(mutex);
+-}
++  if (request.due && session.Authorize(request) && !alertPending && urgentEpoch.load() == sessionEpoch) {
++    // IsRinging() is an external call. An urgent event may arrive while it
++    // runs, after the first epoch guard but before the phase cue.
++    const bool ringing = motor.IsRinging();
++    if (!ringing && urgentEpoch.load() == sessionEpoch) {
++      // Provisional first-trial cue: one short pulse at each phase boundary.
++      motor.RunForDuration(30);
++    }
++  }
++  // MarkUrgent can run while this callback owns the mutex, including inside
++  // IsRinging() or ArmNext(). End before rearming, then check once more after
++  // the normal timer change to avoid overwriting the urgent one-tick retry.
++  if (urgentEpoch.load() != sessionEpoch) {
++    alertPending = true;
++    session.End(static_cast<Roost::EndReason>(urgentReason.load()));
++    xTimerStop(timer, 0);
++  } else {
++    if (session.Running() && !ArmNext(now)) session.End(Roost::EndReason::Manual);
++    if (urgentEpoch.load() != sessionEpoch) {
++      alertPending = true;
++      session.End(static_cast<Roost::EndReason>(urgentReason.load()));
++      xTimerStop(timer, 0);
++    }
++  }
++  xSemaphoreGive(mutex);
++}

@@ -1,0 +1,183 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index e4a354d..f118fd1 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -378,6 +378,8 @@ list(APPEND SOURCE_FILES
+         displayapp/screens/Music.cpp
+         displayapp/screens/Navigation.cpp
+         displayapp/screens/Metronome.cpp
++         displayapp/screens/Roost.cpp
++         components/roost/RoostService.cpp
+         displayapp/screens/Motion.cpp
+         displayapp/screens/Weather.cpp
+         displayapp/screens/Calculator.cpp
+diff --git a/src/components/alarm/AlarmController.cpp b/src/components/alarm/AlarmController.cpp
+index 4ae42c0..9c70acd 100644
+--- a/src/components/alarm/AlarmController.cpp
++++ b/src/components/alarm/AlarmController.cpp
+@@ -118,6 +118,8 @@ void AlarmController::DisableAlarm() {
+ }
+ 
+ void AlarmController::SetOffAlarmNow() {
++  // This timer callback marks Roost ended before alarm display dispatch.
++  systemTask->EndRoostForAlarm();
+   isAlerting = true;
+   systemTask->PushMessage(System::Messages::SetOffAlarm);
+ }
+diff --git a/src/components/ble/AlertNotificationService.cpp b/src/components/ble/AlertNotificationService.cpp
+index d9f2869..a769dc4 100644
+--- a/src/components/ble/AlertNotificationService.cpp
++++ b/src/components/ble/AlertNotificationService.cpp
+@@ -71,6 +71,8 @@ int AlertNotificationService::OnAlert(struct ble_gatt_access_ctxt* ctxt) {
+     switch (category) {
+       case Categories::Call:
+         notif.category = Pinetime::Controllers::NotificationManager::Categories::IncomingCall;
++        // End Roost at call classification, before generic notification delivery.
++        systemTask.EndRoostForCall();
+         break;
+       default:
+         notif.category = Pinetime::Controllers::NotificationManager::Categories::SimpleAlert;
+diff --git a/src/displayapp/Controllers.h b/src/displayapp/Controllers.h
+index 223c7c6..cedfa55 100644
+--- a/src/displayapp/Controllers.h
++++ b/src/displayapp/Controllers.h
+@@ -17,6 +17,7 @@ namespace Pinetime {
+     class HeartRateController;
+     class Settings;
+     class MotorController;
++    class RoostService;
+     class MotionController;
+     class StopWatchController;
+     class AlarmController;
+@@ -41,6 +42,7 @@ namespace Pinetime {
+       Pinetime::Controllers::HeartRateController& heartRateController;
+       Pinetime::Controllers::Settings& settingsController;
+       Pinetime::Controllers::MotorController& motorController;
++      Pinetime::Controllers::RoostService& roostService;
+       Pinetime::Controllers::MotionController& motionController;
+       Pinetime::Controllers::StopWatchController& stopWatchController;
+       Pinetime::Controllers::AlarmController& alarmController;
+diff --git a/src/displayapp/DisplayApp.cpp b/src/displayapp/DisplayApp.cpp
+index 84fa603..3b68211 100644
+--- a/src/displayapp/DisplayApp.cpp
++++ b/src/displayapp/DisplayApp.cpp
+@@ -17,6 +17,7 @@
+ #include "displayapp/screens/Paddle.h"
+ #include "displayapp/screens/StopWatch.h"
+ #include "displayapp/screens/Metronome.h"
++#include "displayapp/screens/Roost.h"
+ #include "displayapp/screens/Music.h"
+ #include "displayapp/screens/Navigation.h"
+ #include "displayapp/screens/Notifications.h"
+@@ -111,6 +112,7 @@ DisplayApp::DisplayApp(Drivers::St7789& lcd,
+     spiNorFlash {spiNorFlash},
+     lvgl {lcd, filesystem},
+     timer(this, TimerCallback),
++    roostService {motorController, filesystem},
+     controllers {batteryController,
+                  bleController,
+                  dateTimeController,
+@@ -118,6 +120,7 @@ DisplayApp::DisplayApp(Drivers::St7789& lcd,
+                  heartRateController,
+                  settingsController,
+                  motorController,
++                  roostService,
+                  motionController,
+                  stopWatchController,
+                  alarmController,
+@@ -161,6 +164,7 @@ void DisplayApp::Process(void* instance) {
+ void DisplayApp::Init() {
+   lcd.Init();
+   motorController.Init();
++  roostService.Init(); // Timer and motor exist before Roost can be opened.
+   brightnessController.Init();
+   ApplyBrightness();
+   lvgl.Init();
+diff --git a/src/displayapp/DisplayApp.h b/src/displayapp/DisplayApp.h
+index 016f91d..21b56f6 100644
+--- a/src/displayapp/DisplayApp.h
++++ b/src/displayapp/DisplayApp.h
+@@ -9,6 +9,7 @@
+ #include "displayapp/TouchEvents.h"
+ #include "components/brightness/BrightnessController.h"
+ #include "components/motor/MotorController.h"
++#include "components/roost/RoostService.h"
+ #include "components/firmwarevalidator/FirmwareValidator.h"
+ #include "components/settings/Settings.h"
+ #include "displayapp/screens/Screen.h"
+@@ -71,6 +72,8 @@ namespace Pinetime {
+                  Pinetime::Controllers::FS& filesystem,
+                  Pinetime::Drivers::SpiNorFlash& spiNorFlash);
+       void Start(System::BootErrors error);
++      void EndRoostForCall() { roostService.EndForCall(); }
++      void EndRoostForAlarm() { roostService.EndForAlarm(); }
+       void PushMessage(Display::Messages msg);
+ 
+       void StartApp(Apps app, DisplayApp::FullRefreshDirections direction);
+@@ -105,6 +108,7 @@ namespace Pinetime {
+       Pinetime::Controllers::FirmwareValidator validator;
+       Pinetime::Components::LittleVgl lvgl;
+       Pinetime::Controllers::Timer timer;
++      Pinetime::Controllers::RoostService roostService;
+ 
+       AppControllers controllers;
+       TaskHandle_t taskHandle;
+diff --git a/src/displayapp/apps/Apps.h.in b/src/displayapp/apps/Apps.h.in
+index d440b59..4ecff56 100644
+--- a/src/displayapp/apps/Apps.h.in
++++ b/src/displayapp/apps/Apps.h.in
+@@ -45,7 +45,8 @@ namespace Pinetime {
+       SettingShakeThreshold,
+       SettingBluetooth,
+       SettingOTA,
+-      Error
++      Error,
++      Roost
+     };
+ 
+     enum class WatchFace : uint8_t {
+diff --git a/src/displayapp/apps/CMakeLists.txt b/src/displayapp/apps/CMakeLists.txt
+index 93196ed..6d80299 100644
+--- a/src/displayapp/apps/CMakeLists.txt
++++ b/src/displayapp/apps/CMakeLists.txt
+@@ -12,6 +12,7 @@ else ()
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Twos")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Dice")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Metronome")
++    set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Roost")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Navigation")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Calculator")
+     set(DEFAULT_USER_APP_TYPES "${DEFAULT_USER_APP_TYPES}, Apps::Weather")
+diff --git a/src/systemtask/SystemTask.cpp b/src/systemtask/SystemTask.cpp
+index 56bf927..98240a2 100644
+--- a/src/systemtask/SystemTask.cpp
++++ b/src/systemtask/SystemTask.cpp
+@@ -510,3 +510,15 @@ void SystemTask::PushMessage(System::Messages msg) {
+     xQueueSend(systemTasksMsgQueue, &msg, portMAX_DELAY);
+   }
+ }
++
++void SystemTask::EndRoostForCall() {
++#ifndef PINETIME_IS_RECOVERY
++  displayApp.EndRoostForCall();
++#endif
++}
++
++void SystemTask::EndRoostForAlarm() {
++#ifndef PINETIME_IS_RECOVERY
++  displayApp.EndRoostForAlarm();
++#endif
++}
+diff --git a/src/systemtask/SystemTask.h b/src/systemtask/SystemTask.h
+index 606ddd3..12480bb 100644
+--- a/src/systemtask/SystemTask.h
++++ b/src/systemtask/SystemTask.h
+@@ -78,6 +78,8 @@ namespace Pinetime {
+ 
+       void Start();
+       void PushMessage(Messages msg);
++      void EndRoostForCall();
++      void EndRoostForAlarm();
+ 
+       bool IsSleepDisabled() {
+         return wakeLocksHeld > 0;

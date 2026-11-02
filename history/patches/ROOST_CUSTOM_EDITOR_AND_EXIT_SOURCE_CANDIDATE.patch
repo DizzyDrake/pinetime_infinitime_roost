@@ -1,0 +1,337 @@
+diff --git a/src/components/roost/RoostEditorDraft.hpp b/src/components/roost/RoostEditorDraft.hpp
+new file mode 100644
+index 0000000..faf93d7
+--- /dev/null
++++ b/src/components/roost/RoostEditorDraft.hpp
+@@ -0,0 +1,24 @@
++#pragma once
++#include <cstdint>
++#include "RoostCore.hpp"
++
++namespace Roost {
++// Pure editor state: 0 means Skip; no zero-duration phase reaches the motor.
++// This does not change a running session until the owner explicitly saves.
++class EditorDraft {
++public:
++  explicit EditorDraft(const uint8_t initial[4]) {
++    for (uint8_t i = 0; i < 4; ++i) values_[i] = initial[i] <= 30 ? initial[i] : 0;
++  }
++  uint8_t SlotIndex() const { return slot_; }
++  uint8_t Seconds() const { return values_[slot_]; }
++  void Increase() { if (values_[slot_] < 30) ++values_[slot_]; }
++  void Decrease() { if (values_[slot_] > 0) --values_[slot_]; }
++  void Next() { slot_ = static_cast<uint8_t>((slot_ + 1) % 4); }
++  void CopyTo(uint8_t out[4]) const { for (uint8_t i = 0; i < 4; ++i) out[i] = values_[i]; }
++  bool Valid() const { Pattern normalized {}; return Normalize(values_, normalized); }
++private:
++  uint8_t values_[4] {};
++  uint8_t slot_ = 0;
++};
++} // namespace Roost
+diff --git a/src/components/roost/RoostService.cpp b/src/components/roost/RoostService.cpp
+index 09a9e5f..eb4f529 100644
+--- a/src/components/roost/RoostService.cpp
++++ b/src/components/roost/RoostService.cpp
+@@ -105,6 +105,33 @@ bool RoostService::SaveCustom(const uint8_t seconds[4]) {
+   return saved;
+ }
+ 
++void RoostService::GetCustomEditValues(uint8_t seconds[4]) {
++  if (!seconds) return;
++  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) {
++    const uint8_t fallback[4] {4, 4, 4, 4};
++    for (uint8_t i = 0; i < 4; ++i) seconds[i] = fallback[i];
++    return;
++  }
++  if (preferences.hasCustom) {
++    for (uint8_t i = 0; i < 4; ++i) seconds[i] = preferences.custom[i];
++  } else {
++    const auto preset = Roost::Preset(session.Selected());
++    // Normalize() omits Skipped slots, so recover the four conceptual slots.
++    for (uint8_t i = 0; i < 4; ++i) seconds[i] = 0;
++    for (uint8_t i = 0; i < preset.count; ++i) {
++      seconds[static_cast<uint8_t>(preset.slots[i].phase)] = preset.slots[i].seconds;
++    }
++  }
++  xSemaphoreGive(mutex);
++}
++
++bool RoostService::HasSavedCustom() {
++  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
++  const bool available = preferences.hasCustom;
++  xSemaphoreGive(mutex);
++  return available;
++}
++
+ bool RoostService::ReadSlot(const char* path, uint32_t& generation, Roost::Preferences& value) {
+   uint8_t bytes[18] {};
+   lfs_file_t file {};
+diff --git a/src/components/roost/RoostService.h b/src/components/roost/RoostService.h
+index 0d04490..964fe43 100644
+--- a/src/components/roost/RoostService.h
++++ b/src/components/roost/RoostService.h
+@@ -24,6 +24,8 @@ namespace Pinetime {
+       void EndForAlarm();
+       bool Select(Roost::Selection selection);
+       bool SaveCustom(const uint8_t seconds[4]);
++      void GetCustomEditValues(uint8_t seconds[4]);
++      bool HasSavedCustom();
+       Roost::Selection Selected();
+       bool Running();
+       Roost::EndReason LastEnd();
+diff --git a/src/displayapp/screens/Roost.cpp b/src/displayapp/screens/Roost.cpp
+index b2bd546..6faa7bd 100644
+--- a/src/displayapp/screens/Roost.cpp
++++ b/src/displayapp/screens/Roost.cpp
+@@ -1,5 +1,6 @@
+ #include "displayapp/screens/Roost.h"
+ #include <lvgl/lvgl.h>
++#include <cstdio>
+ 
+ using Pinetime::Applications::Screens::RoostScreen;
+ 
+@@ -26,6 +27,20 @@ namespace {
+     }
+     return "Inhale";
+   }
++  const char* EditPhaseName(uint8_t slot) {
++    switch (slot) {
++      case 0: return "Inhale";
++      case 1: case 3: return "Hold";
++      case 2: return "Exhale";
++    }
++    return "Inhale";
++  }
++  // Transparent buttons remain touchable but must not obscure the circle.
++  void TransparentButton(lv_obj_t* button) {
++    lv_obj_set_style_local_bg_opa(button, LV_BTN_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_TRANSP);
++    lv_obj_set_style_local_border_width(button, LV_BTN_PART_MAIN, LV_STATE_DEFAULT, 0);
++  }
++
+ }
+ 
+ RoostScreen::RoostScreen(Pinetime::Controllers::RoostService& service) : service {service} {
+@@ -69,6 +84,47 @@ RoostScreen::RoostScreen(Pinetime::Controllers::RoostService& service) : service
+   lv_obj_set_style_local_bg_opa(playButton, LV_BTN_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_TRANSP);
+   playLabel = lv_label_create(playButton, nullptr);
+   lv_obj_set_style_local_text_color(playLabel, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
++  // Normal view: long press the central circle area to edit Custom.
++  editHotspot = lv_btn_create(lv_scr_act(), nullptr);
++  editHotspot->user_data = this;
++  lv_obj_set_event_cb(editHotspot, EventHandler);
++  lv_obj_set_size(editHotspot, 160, 140);
++  lv_obj_align(editHotspot, lv_scr_act(), LV_ALIGN_CENTER, 0, 0);
++  TransparentButton(editHotspot);
++
++  editValueButton = lv_btn_create(lv_scr_act(), nullptr);
++  editValueButton->user_data = this;
++  lv_obj_set_event_cb(editValueButton, EventHandler);
++  lv_obj_set_size(editValueButton, 172, 95);
++  lv_obj_align(editValueButton, lv_scr_act(), LV_ALIGN_CENTER, 0, 0);
++  TransparentButton(editValueButton);
++  editValueLabel = lv_label_create(editValueButton, nullptr);
++  lv_obj_set_style_local_text_color(editValueLabel, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
++  lv_obj_align(editValueLabel, editValueButton, LV_ALIGN_CENTER, 0, 0);
++
++  editUpButton = lv_btn_create(lv_scr_act(), nullptr);
++  editUpButton->user_data = this;
++  lv_obj_set_event_cb(editUpButton, EventHandler);
++  lv_obj_set_size(editUpButton, 110, 41);
++  lv_obj_align(editUpButton, lv_scr_act(), LV_ALIGN_IN_TOP_MID, 0, 5);
++  TransparentButton(editUpButton);
++  editUpLabel = lv_label_create(editUpButton, nullptr);
++  lv_label_set_text(editUpLabel, "+");
++  lv_obj_set_style_local_text_color(editUpLabel, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
++  lv_obj_align(editUpLabel, editUpButton, LV_ALIGN_CENTER, 0, 0);
++
++  editDownButton = lv_btn_create(lv_scr_act(), nullptr);
++  editDownButton->user_data = this;
++  lv_obj_set_event_cb(editDownButton, EventHandler);
++  lv_obj_set_size(editDownButton, 110, 41);
++  lv_obj_align(editDownButton, lv_scr_act(), LV_ALIGN_IN_BOTTOM_RIGHT, -65, -10);
++  TransparentButton(editDownButton);
++  editDownLabel = lv_label_create(editDownButton, nullptr);
++  lv_label_set_text(editDownLabel, "-");
++  lv_obj_set_style_local_text_color(editDownLabel, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
++  lv_obj_align(editDownLabel, editDownButton, LV_ALIGN_CENTER, 0, 0);
++
++  ShowEditor(false);
+   Refresh();
+   taskRefresh = lv_task_create(RefreshTaskCallback, LV_DISP_DEF_REFR_PERIOD, LV_TASK_PRIO_MID, this);
+ }
+@@ -76,10 +132,76 @@ RoostScreen::RoostScreen(Pinetime::Controllers::RoostService& service) : service
+ RoostScreen::~RoostScreen() {
+   lv_task_del(taskRefresh);
+   lv_obj_clean(lv_scr_act());
+-  // Session intentionally survives LVGL screen destruction and screen sleep.
++  // The app screen is preserved during normal sleep. Stop on the physical
++  // button instead of destructing here: phone notification overlays also
++  // destroy the screen and must not end Roost.
++}
++
++void RoostScreen::ShowEditor(bool show) {
++  lv_obj_set_hidden(circle, show);
++  lv_obj_set_hidden(phaseLabel, show);
++  lv_obj_set_hidden(patternButton, show);
++  lv_obj_set_hidden(playButton, show);
++  lv_obj_set_hidden(editHotspot, show);
++  lv_obj_set_hidden(editValueButton, !show);
++  lv_obj_set_hidden(editUpButton, !show);
++  lv_obj_set_hidden(editDownButton, !show);
++}
++
++void RoostScreen::BeginEdit() {
++  service.Stop(); // Provisional: editing a new cycle never changes a live one.
++  service.GetCustomEditValues(editSeed);
++  draft = Roost::EditorDraft(editSeed);
++  saveRejected = false;
++  editing = true;
++  ShowEditor(true);
++  Refresh();
++}
++
++void RoostScreen::SaveEdit() {
++  if (!editing) return;
++  if (!draft.Valid()) {
++    saveRejected = true; // All-Skip cannot form a runnable cycle.
++    Refresh();
++    return;
++  }
++  uint8_t values[4] {};
++  draft.CopyTo(values);
++  // Two explicit persistence calls in this first trial; a combined atomic
++  // Save+Select should be evaluated before final release.
++  if (service.SaveCustom(values) && service.Select(Roost::Selection::Custom)) {
++    editing = false;
++    saveRejected = false;
++    ShowEditor(false);
++  }
++  Refresh();
++}
++
++bool RoostScreen::OnButtonPushed() {
++  // Owner-confirmed: intentional physical-button exit ends the session.
++  // Return false so DisplayApp performs its usual back navigation.
++  editing = false; // Discard unsaved draft on exit.
++  service.Stop();
++  return false;
+ }
+ 
+ void RoostScreen::Refresh() {
++  if (editing) {
++    char text[56] {};
++    if (saveRejected) {
++      std::snprintf(text, sizeof(text), "Choose at least\none phase");
++    } else if (draft.Seconds() == 0) {
++      std::snprintf(text, sizeof(text), "Skip\n%s (%u/4)", EditPhaseName(draft.SlotIndex()),
++                    static_cast<unsigned>(draft.SlotIndex() + 1));
++    } else {
++      std::snprintf(text, sizeof(text), "%u s\n%s (%u/4)",
++                    static_cast<unsigned>(draft.Seconds()), EditPhaseName(draft.SlotIndex()),
++                    static_cast<unsigned>(draft.SlotIndex() + 1));
++    }
++    lv_label_set_text(editValueLabel, text);
++    lv_obj_align(editValueLabel, editValueButton, LV_ALIGN_CENTER, 0, 0);
++    return;
++  }
+   const auto view = service.Observe();
+   const uint32_t fraction = view.phaseDurationMs == 0 ? 0 : view.phaseElapsedMs * 51u / view.phaseDurationMs;
+   uint32_t radius = 32;
+@@ -91,26 +213,46 @@ void RoostScreen::Refresh() {
+   const auto diameter = static_cast<lv_coord_t>(radius * 2u);
+   lv_obj_set_size(circle, diameter, diameter);
+   lv_obj_align(circle, lv_scr_act(), LV_ALIGN_CENTER, 0, 0);
+-  const auto ended = service.LastEnd();
+-  const char* label = view.running ? PhaseName(view.phase) :
+-                      (ended == Roost::EndReason::IncomingCall || ended == Roost::EndReason::WatchAlarm ? "Ended" : "Ready");
+-  lv_label_set_text(phaseLabel, label);
++  // Reopening after a call/alarm must show Ready, not a stale Ended state.
++  lv_label_set_text(phaseLabel, view.running ? PhaseName(view.phase) : "Ready");
+   lv_obj_align(phaseLabel, lv_scr_act(), LV_ALIGN_IN_TOP_MID, 0, 18);
+   lv_label_set_text(patternLabel, PatternName(service.Selected()));
+   lv_label_set_text(playLabel, service.Running() ? "Stop" : "Start");
+ }
+ 
+ void RoostScreen::OnEvent(lv_obj_t* obj, lv_event_t event) {
++  if (editing) {
++    if (event == LV_EVENT_LONG_PRESSED && obj == editValueButton) {
++      SaveEdit();
++    } else if (event == LV_EVENT_CLICKED && obj == editValueButton) {
++      draft.Next();
++      saveRejected = false;
++      Refresh();
++    } else if (event == LV_EVENT_CLICKED && obj == editUpButton) {
++      draft.Increase();
++      saveRejected = false;
++      Refresh();
++    } else if (event == LV_EVENT_CLICKED && obj == editDownButton) {
++      draft.Decrease();
++      saveRejected = false;
++      Refresh();
++    }
++    return;
++  }
++  if (event == LV_EVENT_LONG_PRESSED && obj == editHotspot) {
++    BeginEdit();
++    return;
++  }
+   if (event != LV_EVENT_CLICKED) return;
+   if (obj == playButton) {
+     if (service.Running()) service.Stop();
+     else service.Start();
+   } else if (obj == patternButton) {
+-    // Provisional simple switch: tap label to cycle presets; switching ends
+-    // the old cycle and requires an explicit new Start.
++    // Include saved Custom in the compact selector, with no extra menu.
+     auto selection = service.Selected();
+     if (selection == Roost::Selection::Box) selection = Roost::Selection::FourSevenEight;
+     else if (selection == Roost::Selection::FourSevenEight) selection = Roost::Selection::TwoEight;
++    else if (selection == Roost::Selection::TwoEight && service.HasSavedCustom()) selection = Roost::Selection::Custom;
+     else selection = Roost::Selection::Box;
+     service.Select(selection);
+   }
+diff --git a/src/displayapp/screens/Roost.h b/src/displayapp/screens/Roost.h
+index 63e0404..6e8eadb 100644
+--- a/src/displayapp/screens/Roost.h
++++ b/src/displayapp/screens/Roost.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "components/roost/RoostService.h"
++#include "components/roost/RoostEditorDraft.hpp"
+ #include "displayapp/screens/Screen.h"
+ #include "displayapp/screens/Symbols.h"
+ #include "displayapp/apps/Apps.h"
+@@ -15,9 +16,18 @@ namespace Pinetime {
+         ~RoostScreen() override;
+         void Refresh() override;
+         void OnEvent(lv_obj_t* obj, lv_event_t event);
++        bool OnButtonPushed() override;
+ 
+       private:
++        void BeginEdit();
++        void SaveEdit();
++        void ShowEditor(bool show);
++
+         Controllers::RoostService& service;
++        bool editing = false;
++        bool saveRejected = false;
++        uint8_t editSeed[4] {4, 4, 4, 4};
++        Roost::EditorDraft draft {editSeed};
+         lv_obj_t* background = nullptr;
+         lv_obj_t* circle = nullptr;
+         lv_obj_t* phaseLabel = nullptr;
+@@ -25,6 +35,13 @@ namespace Pinetime {
+         lv_obj_t* patternLabel = nullptr;
+         lv_obj_t* playButton = nullptr;
+         lv_obj_t* playLabel = nullptr;
++        lv_obj_t* editHotspot = nullptr;
++        lv_obj_t* editValueButton = nullptr;
++        lv_obj_t* editValueLabel = nullptr;
++        lv_obj_t* editUpButton = nullptr;
++        lv_obj_t* editUpLabel = nullptr;
++        lv_obj_t* editDownButton = nullptr;
++        lv_obj_t* editDownLabel = nullptr;
+         lv_task_t* taskRefresh = nullptr;
+       };
+     }

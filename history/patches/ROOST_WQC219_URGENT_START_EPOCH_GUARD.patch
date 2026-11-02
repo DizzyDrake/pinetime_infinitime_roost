@@ -1,0 +1,36 @@
+diff --git a/src/components/roost/RoostService.cpp b/src/components/roost/RoostService.cpp
+index 909e9e6..224fd63 100644
+--- a/src/components/roost/RoostService.cpp
++++ b/src/components/roost/RoostService.cpp
+@@ -41,11 +41,12 @@ bool RoostService::ArmNext(uint32_t nowMs) {
+ }
+ 
+ bool RoostService::Start() {
++  // Capture at function entry, BEFORE taking the mutex or checking the motor.
++  // MarkUrgent may increment this epoch while we own the mutex; capturing it
++  // afterward would incorrectly treat that unhandled alert as already seen.
++  const uint32_t entryEpoch = urgentEpoch.load();
+   if (!mutex || !timer || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
+   if (motor.IsRinging()) { xSemaphoreGive(mutex); return false; }
+-  // Snapshot before any startup operation that can overlap an alert ingress.
+-  // A concurrent call/alarm must not be reclassified as already handled.
+-  const uint32_t entryEpoch = urgentEpoch.load();
+   const uint32_t now = NowMs();
+   session.Start(now);
+   alertPending = false;
+@@ -60,6 +61,15 @@ bool RoostService::Start() {
+     return false;
+   }
+   const bool armed = ArmNext(now);
++  // ArmNext may overlap a queued urgent retry: its longer timer period could
++  // otherwise replace the urgent 1-tick retry while our mutex is held.
++  if (urgentEpoch.load() != entryEpoch) {
++    alertPending = true;
++    session.End(static_cast<Roost::EndReason>(urgentReason.load()));
++    xTimerStop(timer, 0);
++    xSemaphoreGive(mutex);
++    return false;
++  }
+   if (!armed) session.End(Roost::EndReason::Manual); // Avoid active-but-silent state.
+   xSemaphoreGive(mutex);
+   return armed;
