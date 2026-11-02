@@ -21,7 +21,7 @@ Choose the file ending in **`-DFU.zip`** from Releases. It's a complete InfiniTi
 ### Features
 
 - Box breathing (4:4:4:4), 4:7:8, and 2:8 presets
-- Custom patterns with up to four phases; hold screen to enter custom edit; skip unwanted phases
+- Custom patterns with up to four phases; hold screen to enter/exit custom edit; skip unwanted phases
 - Haptic phase cues that continue when the display sleeps
 - Incoming calls and watch alarms end a breathing session
 - Roost remembers your selected breathing pattern and custom durations between sessions.
